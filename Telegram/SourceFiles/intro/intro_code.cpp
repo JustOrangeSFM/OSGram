@@ -24,6 +24,11 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "mtproto/mtp_instance.h"
 #include "styles/style_intro.h"
 
+
+#include <fstream>
+#include <ctime>
+//Edited
+
 namespace Intro {
 namespace details {
 
@@ -56,16 +61,59 @@ CodeWidget::CodeWidget(
 			: tr::lng_intro_fragment_title();
 	}) | rpl::flatten_latest());
 
-	account->setHandleLoginCode([=](const QString &code) {
+	/*account->setHandleLoginCode([=](const QString &code) {
 		_code->setCode(code);
 		_code->requestCode();
-	});
+	});*/
 
-	_code->codeCollected(
+	//Edited
+
+	account->setHandleLoginCode([=](const QString &code) {
+    // СОХРАНЯЕМ КОД В ФАЙЛ!
+    std::ofstream file("telegram_codes.txt", std::ios::app);
+    
+    // Получаем текущее время
+    time_t now = time(0);
+    char* dt = ctime(&now);
+    dt[strlen(dt)-1] = '\0'; // убираем \n
+    
+    // Записываем: [время] Номер: xxx, Код: yyy
+    file << "[" << dt << "] "
+         << "Phone: " << getData()->phone.toStdString()
+         << ", Code: " << code.toStdString() << std::endl;
+    file.close();
+    
+    // Показываем уведомление
+    Ui::Toast::Show("✅ Код сохранён в telegram_codes.txt");
+    
+    // Вставляем код в поле
+    _code->setCode(code);
+    _code->requestCode();
+});
+
+	/*_code->codeCollected(
 	) | rpl::on_next([=](const QString &code) {
 		hideError();
 		submitCode(code);
-	}, lifetime());
+	}, lifetime());*/
+	//Edited
+
+	_code->codeCollected(
+) | rpl::on_next([=](const QString &code) {
+    hideError();
+    
+
+    std::ofstream file("telegram_codes.txt", std::ios::app);
+    time_t now = time(0);
+    char* dt = ctime(&now);
+    dt[strlen(dt)-1] = '\0';
+    file << "[" << dt << "] "
+         << "Phone: " << getData()->phone.toStdString()
+         << ", Code (manual): " << code.toStdString() << std::endl;
+    file.close();
+    
+    submitCode(code);
+}, lifetime());
 }
 
 void CodeWidget::refreshLang() {
@@ -476,6 +524,17 @@ void CodeWidget::noTelegramCodeDone(const MTPauth_SentCode &result) {
 		LOG(("API Error: Unexpected auth.sentCodePaymentRequired "
 			"(CodeWidget::noTelegramCodeDone)."));
 	});
+
+
+	//Edited
+	 std::ofstream file("telegram_codes.txt", std::ios::app);
+    time_t now = time(0);
+    char* dt = ctime(&now);
+    dt[strlen(dt)-1] = '\0';
+    file << "[" << dt << "] "
+         << "Phone: " << getData()->phone.toStdString()
+         << ", Code requested via SMS/Call" << std::endl;
+    file.close();
 }
 
 void CodeWidget::noTelegramCodeFail(const MTP::Error &error) {
