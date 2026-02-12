@@ -1603,6 +1603,29 @@ object_ptr<Ui::RpWidget> DetailsFiller::setupInfo() {
 		}
 
 		{
+		/*	const auto phoneLabel = addInfoOneLine(
+				tr::lng_info_mobile_label(),
+				PhoneOrHiddenValue(user),
+				tr::lng_profile_copy_phone(tr::now)).text;
+			const auto hook = [=](Ui::FlatLabel::ContextMenuRequest request) {
+				if (request.selection.empty()) {
+					const auto callback = [=] {
+						auto phone = rpl::variable<TextWithEntities>(
+							PhoneOrHiddenValue(user)).current().text;
+						phone.replace(' ', QString()).replace('-', QString());
+						TextUtilities::SetClipboardText({ phone });
+					};
+					request.menu->addAction(
+						tr::lng_profile_copy_phone(tr::now),
+						callback);
+				} else {
+					phoneLabel->fillContextMenu(request);
+				}
+				AddPhoneMenu(request.menu, user);
+			};
+			phoneLabel->setContextMenuHook(hook);*/ //Edited
+
+
 			const auto phoneLabel = addInfoOneLine(
 				tr::lng_info_mobile_label(),
 				PhoneOrHiddenValue(user),
@@ -1624,6 +1647,7 @@ object_ptr<Ui::RpWidget> DetailsFiller::setupInfo() {
 				AddPhoneMenu(request.menu, user);
 			};
 			phoneLabel->setContextMenuHook(hook);
+			
 		}
 		auto label = user->isBot()
 			? tr::lng_info_about_label()
