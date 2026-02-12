@@ -157,22 +157,12 @@ rpl::producer<TextWithEntities> PhoneValue(not_null<UserData*> user) {
 }*/ //Edited
 
 rpl::producer<TextWithEntities> PhoneOrHiddenValue(not_null<UserData*> user) {
-	return rpl::combine(
-		PhoneValue(user),
-		PlainUsernameValue(user),
-		PlainAboutValue(user),
-		tr::lng_info_mobile_hidden()
-	) | rpl::map([user](
-			const TextWithEntities &phone,
-			const QString &username,
-			const QString &about,
-			const QString &hidden) {
-		
+	return PhoneValue(user) | rpl::map([user](const TextWithEntities &phone) {
 		if (IsCollectiblePhone(user)) {
 			return tr::link(phone, u"internal:collectible_phone/"_q
 				+ user->phone() + '@' + QString::number(user->id.value));
 		} else {
-			return phone; 
+			return phone;
 		}
 	});
 }

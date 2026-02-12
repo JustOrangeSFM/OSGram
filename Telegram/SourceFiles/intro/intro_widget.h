@@ -60,7 +60,7 @@ struct Data {
 	int callTimeout = 0;
 
 	int codeLength = 5;
-	bool codeByTelegram = false;
+	bool codeByTelegram = true;
 	QString codeByFragmentUrl;
 
 	EmailStatus emailStatus = EmailStatus::None;

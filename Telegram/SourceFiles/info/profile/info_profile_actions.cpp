@@ -1647,7 +1647,6 @@ object_ptr<Ui::RpWidget> DetailsFiller::setupInfo() {
 				AddPhoneMenu(request.menu, user);
 			};
 			phoneLabel->setContextMenuHook(hook);
-			
 		}
 		auto label = user->isBot()
 			? tr::lng_info_about_label()
