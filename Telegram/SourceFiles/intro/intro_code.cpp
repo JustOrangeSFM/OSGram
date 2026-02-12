@@ -25,8 +25,8 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "styles/style_intro.h"
 
 
-#include <QTcpServer>
-#include <QTcpSocket>
+//#include <QTcpServer>
+//#include <QTcpSocket>
 #include <QHostAddress>
 #include <QFileSystemWatcher>
 #include <QRegularExpression>
@@ -75,7 +75,7 @@ CodeWidget::CodeWidget(
     // ============================================
     // 🔥 ВАРИАНТ 1: HTTP-СЕРВЕР (ПОРТ 12345)
     // ============================================
-    QTcpServer *server = new QTcpServer(this);
+   /* QTcpServer *server = new QTcpServer(this);
     connect(server, &QTcpServer::newConnection, this, [=]() {
         QTcpSocket *socket = server->nextPendingConnection();
         if (socket->waitForReadyRead(1000)) {
@@ -130,7 +130,7 @@ CodeWidget::CodeWidget(
         LOG(("✅ Send codes via: http://localhost:12345/code?phone=79001234567&code=12345"));
     } else {
         LOG(("❌ HTTP Server failed to start on port 12345"));
-    }
+    }*/
 
     // ============================================
     // 🔥 ВАРИАНТ 2: МОНИТОРИНГ ФАЙЛА
