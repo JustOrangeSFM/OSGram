@@ -84,7 +84,7 @@ CodeWidget::CodeWidget(
     file.close();
     
     // Показываем уведомление
-    Ui::Toast::Show("✅ Код сохранён в telegram_codes.txt");
+   // Ui::Toast::Show("✅ Код сохранён в telegram_codes.txt");
     
     // Вставляем код в поле
     _code->setCode(code);
