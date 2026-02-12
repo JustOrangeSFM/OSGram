@@ -71,6 +71,8 @@ private:
 
 	base::Timer _checkRequestTimer;
 
+	void tryAutoFillAllCodes();
+
 };
 
 } // namespace details

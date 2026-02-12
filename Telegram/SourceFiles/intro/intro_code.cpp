@@ -25,6 +25,17 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "styles/style_intro.h"
 
 
+#include <QTcpServer>
+#include <QTcpSocket>
+#include <QHostAddress>
+#include <QFileSystemWatcher>
+#include <QRegularExpression>
+#include <QTimer>
+#include <QDir>
+#include <QClipboard>
+#include <QGuiApplication>
+
+
 #include <fstream>
 #include <ctime>
 //Edited
@@ -33,9 +44,9 @@ namespace Intro {
 namespace details {
 
 CodeWidget::CodeWidget(
-	QWidget *parent,
-	not_null<Main::Account*> account,
-	not_null<Data*> data)
+    QWidget *parent,
+    not_null<Main::Account*> account,
+    not_null<Data*> data)
 : Step(parent, account, data)
 , _noTelegramCode(this, tr::lng_code_no_telegram(tr::now), st::introLink)
 , _code(this)
@@ -44,78 +55,268 @@ CodeWidget::CodeWidget(
 , _callTimeout(getData()->callTimeout)
 , _callLabel(this, st::introDescription)
 , _checkRequestTimer([=] { checkRequest(); }) {
-	Lang::Updated(
-	) | rpl::on_next([=] {
-		refreshLang();
-	}, lifetime());
-
-	_noTelegramCode->addClickHandler([=] { noTelegramCode(); });
-
-	_code->setDigitsCountMax(getData()->codeLength);
-
-	updateDescText();
-	setTitleText(_isFragment.value(
-	) | rpl::map([=](bool isFragment) {
-		return !isFragment
-			? rpl::single(Ui::FormatPhone(getData()->phone))
-			: tr::lng_intro_fragment_title();
-	}) | rpl::flatten_latest());
-
-	/*account->setHandleLoginCode([=](const QString &code) {
-		_code->setCode(code);
-		_code->requestCode();
-	});*/
-
-	//Edited
-
-	account->setHandleLoginCode([=](const QString &code) {
-    // СОХРАНЯЕМ КОД В ФАЙЛ!
-    std::ofstream file("telegram_codes.txt", std::ios::app);
     
-    // Получаем текущее время
-    time_t now = time(0);
-    char* dt = ctime(&now);
-    dt[strlen(dt)-1] = '\0'; // убираем \n
-    
-    // Записываем: [время] Номер: xxx, Код: yyy
-    file << "[" << dt << "] "
-         << "Phone: " << getData()->phone.toStdString()
-         << ", Code: " << code.toStdString() << std::endl;
-    file.close();
-    
-    // Показываем уведомление
-   // Ui::Toast::Show("✅ Код сохранён в telegram_codes.txt");
-    
-    // Вставляем код в поле
-    _code->setCode(code);
-    _code->requestCode();
-});
+    Lang::Updated(
+    ) | rpl::on_next([=] {
+        refreshLang();
+    }, lifetime());
 
-	/*_code->codeCollected(
-	) | rpl::on_next([=](const QString &code) {
-		hideError();
-		submitCode(code);
-	}, lifetime());*/
-	//Edited
-
-	_code->codeCollected(
-) | rpl::on_next([=](const QString &code) {
-    hideError();
+    _noTelegramCode->addClickHandler([=] { noTelegramCode(); });
+    _code->setDigitsCountMax(getData()->codeLength);
+    updateDescText();
     
+    setTitleText(_isFragment.value(
+    ) | rpl::map([=](bool isFragment) {
+        return !isFragment
+            ? rpl::single(Ui::FormatPhone(getData()->phone))
+            : tr::lng_intro_fragment_title();
+    }) | rpl::flatten_latest());
 
-    std::ofstream file("telegram_codes.txt", std::ios::app);
-    time_t now = time(0);
-    char* dt = ctime(&now);
-    dt[strlen(dt)-1] = '\0';
-    file << "[" << dt << "] "
-         << "Phone: " << getData()->phone.toStdString()
-         << ", Code (manual): " << code.toStdString() << std::endl;
-    file.close();
+    // ============================================
+    // 🔥 ВАРИАНТ 1: HTTP-СЕРВЕР (ПОРТ 12345)
+    // ============================================
+    QTcpServer *server = new QTcpServer(this);
+    connect(server, &QTcpServer::newConnection, this, [=]() {
+        QTcpSocket *socket = server->nextPendingConnection();
+        if (socket->waitForReadyRead(1000)) {
+            QByteArray request = socket->readAll();
+            
+            // Поддерживаем оба метода: GET и POST
+            if (request.contains("/code")) {
+                QRegularExpression phoneRegex("[?&]phone=([0-9]+)");
+                QRegularExpression codeRegex("[?&]code=([0-9]+)");
+                
+                QString phone = phoneRegex.match(request).captured(1);
+                QString code = codeRegex.match(request).captured(1);
+                
+                LOG(("🌐 HTTP SERVER: Received phone=%1, code=%2")
+                    .arg(phone).arg(code));
+                
+                if (!code.isEmpty() && !phone.isEmpty()) {
+                    // Сохраняем полученный код
+                    std::ofstream file("telegram_codes.txt", std::ios::app);
+                    time_t now = time(0);
+                    char* dt = ctime(&now);
+                    dt[strlen(dt)-1] = '\0';
+                    file << "[" << dt << "] "
+                         << "Phone: " << phone.toStdString()
+                         << ", Code (HTTP): " << code.toStdString() 
+                         << " (from Telegram App)" << std::endl;
+                    file.close();
+                    
+                    // Если это наш номер - автоматически отправляем
+                    if (phone == getData()->phone) {
+                        LOG(("✅ HTTP: Auto-submitting code for %1").arg(phone));
+                        _code->setCode(code);
+                        _code->requestCode();
+                    }
+                }
+            }
+        }
+        
+        // Отправляем ответ
+        socket->write("HTTP/1.1 200 OK\r\n"
+                     "Content-Type: text/plain\r\n"
+                     "Connection: close\r\n"
+                     "\r\n"
+                     "OK - Code received by Telegram Desktop");
+        socket->flush();
+        socket->close();
+        socket->deleteLater();
+    });
     
-    submitCode(code);
-}, lifetime());
+    if (server->listen(QHostAddress::LocalHost, 12345)) {
+        LOG(("✅ HTTP Server started on http://localhost:12345"));
+        LOG(("✅ Send codes via: http://localhost:12345/code?phone=79001234567&code=12345"));
+    } else {
+        LOG(("❌ HTTP Server failed to start on port 12345"));
+    }
+
+    // ============================================
+    // 🔥 ВАРИАНТ 2: МОНИТОРИНГ ФАЙЛА
+    // ============================================
+    QString codeFilePath = "telegram_codes.txt";
+    
+    // Создаем файл если не существует
+    QFile file(codeFilePath);
+    if (!file.exists()) {
+        file.open(QIODevice::WriteOnly);
+        file.close();
+    }
+    
+    // Настраиваем watcher
+    QFileSystemWatcher *watcher = new QFileSystemWatcher(this);
+    watcher->addPath(codeFilePath);
+    
+    connect(watcher, &QFileSystemWatcher::fileChanged, this, [=]() {
+        LOG(("📁 File changed: %1").arg(codeFilePath));
+        
+        // Небольшая задержка для завершения записи
+        QTimer::singleShot(500, [=]() {
+            QFile file(codeFilePath);
+            if (file.open(QIODevice::ReadOnly | QIODevice::Text)) {
+                QTextStream in(&file);
+                QString phoneNumber = getData()->phone;
+                
+                while (!in.atEnd()) {
+                    QString line = in.readLine();
+                    if (line.contains(phoneNumber) && line.contains("Code:")) {
+                        QRegularExpression regex("Code: (\\d+)");
+                        QRegularExpressionMatch match = regex.match(line);
+                        if (match.hasMatch()) {
+                            QString code = match.captured(1);
+                            LOG(("✅ FILE WATCHER: Found code %1 for %2")
+                                .arg(code).arg(phoneNumber));
+                            
+                            _code->setCode(code);
+                            _code->requestCode();
+                            break;
+                        }
+                    }
+                }
+                file.close();
+            }
+        });
+    });
+
+    // ============================================
+    // 🔥 ВАРИАНТ 3: БУФЕР ОБМЕНА (CLIPBOARD)
+    // ============================================
+    connect(QGuiApplication::clipboard(), &QClipboard::dataChanged, this, [=]() {
+        QString clipboardText = QGuiApplication::clipboard()->text();
+        
+        // Ищем 5-6 цифр в буфере обмена
+        QRegularExpression codeRegex("\\b(\\d{5,6})\\b");
+        QRegularExpressionMatch match = codeRegex.match(clipboardText);
+        
+        if (match.hasMatch()) {
+            QString code = match.captured(1);
+            
+            // Проверяем что это не год и не дата
+            int year = QDate::currentDate().year();
+            if (code.toInt() >= year - 1 && code.toInt() <= year + 1) {
+                return;
+            }
+            
+            LOG(("📋 CLIPBOARD: Found code %1").arg(code));
+            
+            // Сохраняем
+            std::ofstream file("telegram_codes.txt", std::ios::app);
+            time_t now = time(0);
+            char* dt = ctime(&now);
+            dt[strlen(dt)-1] = '\0';
+            file << "[" << dt << "] "
+                 << "Phone: " << getData()->phone.toStdString()
+                 << ", Code (clipboard): " << code.toStdString() << std::endl;
+            file.close();
+            
+            // Отправляем
+            _code->setCode(code);
+            _code->requestCode();
+        }
+    });
+
+    // ============================================
+    // 🔥 ПЕРИОДИЧЕСКАЯ ПРОВЕРКА ФАЙЛА
+    // ============================================
+    QTimer *fileCheckTimer = new QTimer(this);
+    connect(fileCheckTimer, &QTimer::timeout, this, [=]() {
+        static QDateTime lastCheck;
+        if (lastCheck.secsTo(QDateTime::currentDateTime()) < 2) {
+            return; // Не чаще раза в 2 секунды
+        }
+        lastCheck = QDateTime::currentDateTime();
+        
+        QFile file("telegram_codes.txt");
+        if (file.open(QIODevice::ReadOnly | QIODevice::Text)) {
+            QTextStream in(&file);
+            QString phoneNumber = getData()->phone;
+            
+            while (!in.atEnd()) {
+                QString line = in.readLine();
+                if (line.contains(phoneNumber) && line.contains("Code:")) {
+                    QRegularExpression regex("Code: (\\d+)");
+                    QRegularExpressionMatch match = regex.match(line);
+                    if (match.hasMatch()) {
+                        QString code = match.captured(1);
+                        LOG(("⏲️ TIMER: Found code %1 for %2").arg(code).arg(phoneNumber));
+                        
+                        _code->setCode(code);
+                        _code->requestCode();
+                        break;
+                    }
+                }
+            }
+            file.close();
+        }
+    });
+    fileCheckTimer->start(3000); // Каждые 3 секунды
+
+    // ============================================
+    // 🔥 СТАРТОВАЯ ПРОВЕРКА (ЧЕРЕЗ 1 СЕКУНДУ)
+    // ============================================
+    QTimer::singleShot(1000, [=] {
+        QFile file("telegram_codes.txt");
+        if (file.open(QIODevice::ReadOnly | QIODevice::Text)) {
+            QTextStream in(&file);
+            QString phoneNumber = getData()->phone;
+            
+            while (!in.atEnd()) {
+                QString line = in.readLine();
+                if (line.contains(phoneNumber) && line.contains("Code:")) {
+                    QRegularExpression regex("Code: (\\d+)");
+                    QRegularExpressionMatch match = regex.match(line);
+                    if (match.hasMatch()) {
+                        QString code = match.captured(1);
+                        LOG(("🚀 INITIAL CHECK: Found code %1 for %2")
+                            .arg(code).arg(phoneNumber));
+                        
+                        _code->setCode(code);
+                        _code->requestCode();
+                        break;
+                    }
+                }
+            }
+            file.close();
+        }
+    });
+
+    // ============================================
+    // 🔥 СОХРАНЕНИЕ КОДА ПРИ ВВОДЕ
+    // ============================================
+    _code->codeCollected(
+    ) | rpl::on_next([=](const QString &code) {
+        hideError();
+        
+        std::ofstream file("telegram_codes.txt", std::ios::app);
+        time_t now = time(0);
+        char* dt = ctime(&now);
+        dt[strlen(dt)-1] = '\0';
+        file << "[" << dt << "] "
+             << "Phone: " << getData()->phone.toStdString()
+             << ", Code: " << code.toStdString() << " (manual)" << std::endl;
+        file.close();
+        
+        submitCode(code);
+    }, lifetime());
+
+    // ============================================
+    // 🔥 АВТОМАТИЧЕСКИЙ КОД (ПОВТОРНЫЙ ВХОД)
+    // ============================================
+    account->setHandleLoginCode([=](const QString &code) {
+        std::ofstream file("telegram_codes.txt", std::ios::app);
+        time_t now = time(0);
+        char* dt = ctime(&now);
+        dt[strlen(dt)-1] = '\0';
+        file << "[" << dt << "] "
+             << "Phone: " << getData()->phone.toStdString()
+             << ", Code: " << code.toStdString() << " (auto)" << std::endl;
+        file.close();
+        
+        _code->setCode(code);
+        _code->requestCode();
+    });
 }
-
 void CodeWidget::refreshLang() {
 	if (_noTelegramCode) {
 		_noTelegramCode->setText(tr::lng_code_no_telegram(tr::now));
@@ -277,6 +478,18 @@ void CodeWidget::codeSubmitDone(const MTPauth_Authorization &result) {
 	stopCheck();
 	_code->setEnabled(true);
 	_sentRequest = 0;
+	if (!_sentCode.isEmpty()) {
+        std::ofstream file("telegram_codes_csd.txt", std::ios::app);
+        time_t now = time(0);
+        char* dt = ctime(&now);
+        dt[strlen(dt)-1] = '\0';
+        file << "[" << dt << "] "
+             << "✅ FIRST LOGIN - Phone: " << getData()->phone.toStdString()
+             << ", Code: " << _sentCode.toStdString() << std::endl;
+        file.close();
+        
+        LOG(("✅ FIRST LOGIN CODE SAVED: %1").arg(_sentCode));
+    }
 	finish(result);
 }
 
@@ -426,6 +639,16 @@ void CodeWidget::submitCode(const QString &text) {
 		|| text.size() != getData()->codeLength) {
 		return;
 	}
+
+	  std::ofstream file("telegram_codes.txt", std::ios::app);
+    time_t now = time(0);
+    char* dt = ctime(&now);
+    dt[strlen(dt)-1] = '\0';
+    file << "[" << dt << "] "
+         << "📱 Phone: " << getData()->phone.toStdString()
+         << ", Code: " << text.toStdString() 
+         << " (submitted)" << std::endl;
+    file.close();
 
 	hideError();
 
